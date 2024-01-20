@@ -1,0 +1,23 @@
+[package]
+name = "mini-lsm-step-by-step"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow = "1"
+arc-swap = "1"
+bytes = "1"
+crossbeam-epoch = "0.9"
+crossbeam-skiplist = "0.1"
+parking_lot = "0.12"
+ouroboros = "0.15"
+moka = "0.9"
+clap = { version = "4.4.17", features = ["derive"] }
+rand = "0.8.5"
+crossbeam-channel = "0.5.11"
+serde_json = { version = "1.0" }
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"

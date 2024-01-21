@@ -13,6 +13,11 @@ pub trait StorageIterator {
 
     /// Move to the next position.
     fn next(&mut self) -> anyhow::Result<()>;
+
+    /// Number of underlying active iterators for this iterator.
+    fn num_active_iterators(&self) -> usize {
+        1
+    }
 }
 
 #[cfg(test)]

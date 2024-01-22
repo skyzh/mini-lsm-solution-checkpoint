@@ -15,7 +15,19 @@ pub struct SstConcatIterator {
 }
 
 impl SstConcatIterator {
+    fn check_sst_valid(sstables: &[Arc<SsTable>]) {
+        for sst in sstables {
+            assert!(sst.first_key() <= sst.last_key());
+        }
+        if !sstables.is_empty() {
+            for i in 0..(sstables.len() - 1) {
+                assert!(sstables[i].last_key() < sstables[i + 1].first_key());
+            }
+        }
+    }
+
     pub fn create_and_seek_to_first(sstables: Vec<Arc<SsTable>>) -> Result<Self> {
+        Self::check_sst_valid(&sstables);
         if sstables.is_empty() {
             return Ok(Self {
                 current: None,
@@ -35,7 +47,8 @@ impl SstConcatIterator {
     }
 
     pub fn create_and_seek_to_key(sstables: Vec<Arc<SsTable>>, key: &[u8]) -> Result<Self> {
-        let idx = sstables
+        Self::check_sst_valid(&sstables);
+        let idx: usize = sstables
             .partition_point(|table| table.first_key() <= key)
             .saturating_sub(1);
         if idx >= sstables.len() {
@@ -46,8 +59,9 @@ impl SstConcatIterator {
             });
         }
         let mut iter = Self {
-            current: Some(SsTableIterator::create_and_seek_to_first(
+            current: Some(SsTableIterator::create_and_seek_to_key(
                 sstables[idx].clone(),
+                key,
             )?),
             next_sst_idx: idx + 1,
             sstables,

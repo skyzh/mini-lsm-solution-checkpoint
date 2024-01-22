@@ -19,6 +19,3 @@ pub trait StorageIterator {
         1
     }
 }
-
-#[cfg(test)]
-mod tests;

@@ -446,7 +446,13 @@ impl LsmStorageInner {
             let mem = snapshot.imm_memtables.pop().unwrap();
             assert_eq!(mem.id(), sst_id);
             // Add L0 table
-            snapshot.l0_sstables.insert(0, sst_id);
+            if self.compaction_controller.flush_to_l0() {
+                // In leveled compaction or no compaction, simply flush to L0
+                snapshot.l0_sstables.insert(0, sst_id);
+            } else {
+                // In tiered compaction, create a new tier
+                snapshot.levels.insert(0, (sst_id, vec![sst_id]));
+            }
             println!("flushed {}.sst with size={}", sst_id, sst.table_size());
             snapshot.sstables.insert(sst_id, sst);
             // Update the snapshot.

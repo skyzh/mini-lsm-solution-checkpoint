@@ -120,6 +120,7 @@ fn main() -> Result<()> {
                 std::ops::Bound::Included(begin_key.as_bytes()),
                 std::ops::Bound::Included(end_key.as_bytes()),
             )?;
+            let mut cnt = 0;
             while iter.is_valid() {
                 println!(
                     "{:?}={:?}",
@@ -127,7 +128,9 @@ fn main() -> Result<()> {
                     Bytes::copy_from_slice(iter.value()),
                 );
                 iter.next()?;
+                cnt += 1;
             }
+            println!("{} keys scanned", cnt);
         } else if line == "dump" {
             lsm.dump_structure();
         } else if line == "flush" {

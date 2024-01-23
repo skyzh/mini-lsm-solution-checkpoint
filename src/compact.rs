@@ -21,6 +21,7 @@ use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
 use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
+use crate::manifest::ManifestRecord;
 use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -313,14 +314,14 @@ impl LsmStorageInner {
         let files_added = sstables.len();
         let output = sstables.iter().map(|x| x.sst_id()).collect::<Vec<_>>();
         let ssts_to_remove = {
-            let _state_lock = self.state_lock.lock();
+            let state_lock = self.state_lock.lock();
             let (mut snapshot, files_to_remove) = self
                 .compaction_controller
                 .apply_compaction_result(&self.state.read(), &task, &output);
             let mut ssts_to_remove = Vec::with_capacity(files_to_remove.len());
             for file_to_remove in &files_to_remove {
                 let result = snapshot.sstables.remove(file_to_remove);
-                assert!(result.is_some());
+                assert!(result.is_some(), "cannot remove {}.sst", file_to_remove);
                 ssts_to_remove.push(result.unwrap());
             }
             let mut new_sst_ids = Vec::new();
@@ -331,6 +332,12 @@ impl LsmStorageInner {
             }
             let mut state = self.state.write();
             *state = Arc::new(snapshot);
+            drop(state);
+            self.sync_dir()?;
+            self.manifest
+                .as_ref()
+                .unwrap()
+                .add_record(&state_lock, ManifestRecord::Compaction(task, new_sst_ids))?;
             ssts_to_remove
         };
         println!(
@@ -341,6 +348,8 @@ impl LsmStorageInner {
         for sst in ssts_to_remove {
             std::fs::remove_file(self.path_of_sst(sst.sst_id()))?;
         }
+        self.sync_dir()?;
+
         Ok(())
     }
 

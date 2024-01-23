@@ -91,6 +91,12 @@ fn main() -> Result<()> {
             }
 
             println!("{} values filled with epoch {}", end - begin + 1, epoch);
+        } else if line.starts_with("del ") {
+            let Some((_, key)) = line.split_once(' ') else {
+                println!("invalid command");
+                continue;
+            };
+            lsm.delete(key.as_bytes())?;
         } else if line.starts_with("get ") {
             let Some((_, key)) = line.split_once(' ') else {
                 println!("invalid command");
@@ -126,6 +132,8 @@ fn main() -> Result<()> {
             lsm.dump_structure();
         } else if line == "flush" {
             lsm.force_flush()?;
+        } else if line == "full_compaction" {
+            lsm.force_full_compaction()?;
         } else if line == "quit" {
             lsm.close()?;
             break;

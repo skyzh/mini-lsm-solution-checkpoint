@@ -235,6 +235,10 @@ impl MiniLsm {
         }))
     }
 
+    pub fn write_batch<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<()> {
+        self.inner.write_batch(batch)
+    }
+
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         self.inner.get(key)
     }

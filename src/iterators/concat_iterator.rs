@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::table::{SsTable, SsTableIterator};
+use crate::{
+    key::KeySlice,
+    table::{SsTable, SsTableIterator},
+};
 
 use super::StorageIterator;
 
@@ -46,10 +49,10 @@ impl SstConcatIterator {
         Ok(iter)
     }
 
-    pub fn create_and_seek_to_key(sstables: Vec<Arc<SsTable>>, key: &[u8]) -> Result<Self> {
+    pub fn create_and_seek_to_key(sstables: Vec<Arc<SsTable>>, key: KeySlice) -> Result<Self> {
         Self::check_sst_valid(&sstables);
         let idx: usize = sstables
-            .partition_point(|table| table.first_key() <= key)
+            .partition_point(|table| table.first_key().as_key_slice() <= key)
             .saturating_sub(1);
         if idx >= sstables.len() {
             return Ok(Self {
@@ -71,21 +74,17 @@ impl SstConcatIterator {
     }
 
     fn move_until_valid(&mut self) -> Result<()> {
-        loop {
-            if let Some(iter) = self.current.as_mut() {
-                if iter.is_valid() {
-                    break;
-                }
-                if self.next_sst_idx >= self.sstables.len() {
-                    self.current = None;
-                } else {
-                    self.current = Some(SsTableIterator::create_and_seek_to_first(
-                        self.sstables[self.next_sst_idx].clone(),
-                    )?);
-                    self.next_sst_idx += 1;
-                }
-            } else {
+        while let Some(iter) = self.current.as_mut() {
+            if iter.is_valid() {
                 break;
+            }
+            if self.next_sst_idx >= self.sstables.len() {
+                self.current = None;
+            } else {
+                self.current = Some(SsTableIterator::create_and_seek_to_first(
+                    self.sstables[self.next_sst_idx].clone(),
+                )?);
+                self.next_sst_idx += 1;
             }
         }
         Ok(())
@@ -93,7 +92,9 @@ impl SstConcatIterator {
 }
 
 impl StorageIterator for SstConcatIterator {
-    fn key(&self) -> &[u8] {
+    type KeyType<'a> = KeySlice<'a>;
+
+    fn key(&self) -> KeySlice {
         self.current.as_ref().unwrap().key()
     }
 

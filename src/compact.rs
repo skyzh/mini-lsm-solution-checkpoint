@@ -1,5 +1,3 @@
-#![allow(dead_code)] // REMOVE THIS LINE after fully implementing this functionality
-
 mod leveled;
 mod simple_leveled;
 mod tiered;
@@ -20,6 +18,7 @@ use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
+use crate::key::KeySlice;
 use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
 use crate::manifest::ManifestRecord;
 use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
@@ -57,13 +56,13 @@ impl CompactionController {
     pub fn generate_compaction_task(&self, snapshot: &LsmStorageState) -> Option<CompactionTask> {
         match self {
             CompactionController::Leveled(ctrl) => ctrl
-                .generate_compaction_task(&snapshot)
+                .generate_compaction_task(snapshot)
                 .map(CompactionTask::Leveled),
             CompactionController::Simple(ctrl) => ctrl
-                .generate_compaction_task(&snapshot)
+                .generate_compaction_task(snapshot)
                 .map(CompactionTask::Simple),
             CompactionController::Tiered(ctrl) => ctrl
-                .generate_compaction_task(&snapshot)
+                .generate_compaction_task(snapshot)
                 .map(CompactionTask::Tiered),
             CompactionController::NoCompaction => unreachable!(),
         }
@@ -77,13 +76,13 @@ impl CompactionController {
     ) -> (LsmStorageState, Vec<usize>) {
         match (self, task) {
             (CompactionController::Leveled(ctrl), CompactionTask::Leveled(task)) => {
-                ctrl.apply_compaction_result(&snapshot, task, output)
+                ctrl.apply_compaction_result(snapshot, task, output)
             }
             (CompactionController::Simple(ctrl), CompactionTask::Simple(task)) => {
-                ctrl.apply_compaction_result(&snapshot, task, output)
+                ctrl.apply_compaction_result(snapshot, task, output)
             }
             (CompactionController::Tiered(ctrl), CompactionTask::Tiered(task)) => {
-                ctrl.apply_compaction_result(&snapshot, task, output)
+                ctrl.apply_compaction_result(snapshot, task, output)
             }
             _ => unreachable!(),
         }
@@ -92,11 +91,10 @@ impl CompactionController {
 
 impl CompactionController {
     pub fn flush_to_l0(&self) -> bool {
-        if let Self::Leveled(_) | Self::Simple(_) | Self::NoCompaction = self {
-            true
-        } else {
-            false
-        }
+        matches!(
+            self,
+            Self::Leveled(_) | Self::Simple(_) | Self::NoCompaction
+        )
     }
 }
 
@@ -115,7 +113,7 @@ pub enum CompactionOptions {
 impl LsmStorageInner {
     fn compact_generate_sst_from_iter(
         &self,
-        mut iter: impl StorageIterator,
+        mut iter: impl for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>,
         compact_to_bottom_level: bool,
     ) -> Result<Vec<Arc<SsTable>>> {
         let mut builder = None;
@@ -379,10 +377,11 @@ impl LsmStorageInner {
     }
 
     fn trigger_flush(&self) -> Result<()> {
-        if {
+        let res = {
             let state = self.state.read();
             state.imm_memtables.len() >= self.options.num_memtable_limit
-        } {
+        };
+        if res {
             self.force_flush_next_imm_memtable()?;
         }
 
@@ -405,6 +404,6 @@ impl LsmStorageInner {
                 }
             }
         });
-        return Ok(Some(handle));
+        Ok(Some(handle))
     }
 }

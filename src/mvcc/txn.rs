@@ -4,10 +4,7 @@
 use std::{
     collections::HashSet,
     ops::Bound,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    sync::{atomic::AtomicBool, Arc},
 };
 
 use anyhow::Result;

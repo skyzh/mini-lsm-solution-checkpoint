@@ -10,20 +10,17 @@ use std::{
     },
 };
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use bytes::Bytes;
-use crossbeam_skiplist::{map::Entry, SkipMap};
+use crossbeam_skiplist::SkipMap;
 use ouroboros::self_referencing;
 use parking_lot::Mutex;
 
 use crate::{
-    iterators::{two_merge_iterator::TwoMergeIterator, StorageIterator},
+    iterators::StorageIterator,
     lsm_iterator::{FusedIterator, LsmIterator},
-    lsm_storage::{LsmStorageInner, WriteBatchRecord},
-    mem_table::map_bound,
+    lsm_storage::LsmStorageInner,
 };
-
-use super::CommittedTxnData;
 
 pub struct Transaction {
     pub(crate) read_ts: u64,
@@ -36,11 +33,14 @@ pub struct Transaction {
 
 impl Transaction {
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
-        unimplemented!()
+        self.inner.get_with_ts(key, self.read_ts)
     }
 
     pub fn scan(self: &Arc<Self>, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> Result<TxnIterator> {
-        unimplemented!()
+        TxnIterator::create(
+            self.clone(),
+            self.inner.scan_with_ts(lower, upper, self.read_ts)?,
+        )
     }
 
     pub fn put(&self, key: &[u8], value: &[u8]) {
@@ -97,15 +97,13 @@ impl StorageIterator for TxnLocalIterator {
 
 pub struct TxnIterator {
     _txn: Arc<Transaction>,
-    iter: TwoMergeIterator<TxnLocalIterator, FusedIterator<LsmIterator>>,
+    iter: FusedIterator<LsmIterator>,
 }
 
 impl TxnIterator {
-    pub fn create(
-        txn: Arc<Transaction>,
-        iter: TwoMergeIterator<TxnLocalIterator, FusedIterator<LsmIterator>>,
-    ) -> Result<Self> {
-        unimplemented!()
+    pub fn create(txn: Arc<Transaction>, iter: FusedIterator<LsmIterator>) -> Result<Self> {
+        let iter = Self { _txn: txn, iter };
+        Ok(iter)
     }
 }
 
@@ -125,7 +123,8 @@ impl StorageIterator for TxnIterator {
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        self.iter.next()?;
+        Ok(())
     }
 
     fn num_active_iterators(&self) -> usize {

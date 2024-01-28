@@ -68,6 +68,7 @@ impl LsmStorageState {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct LsmStorageOptions {
     // Block size in bytes
     pub block_size: usize,
@@ -77,6 +78,7 @@ pub struct LsmStorageOptions {
     pub num_memtable_limit: usize,
     pub compaction_options: CompactionOptions,
     pub enable_wal: bool,
+    pub serializable: bool,
 }
 
 impl LsmStorageOptions {
@@ -87,6 +89,7 @@ impl LsmStorageOptions {
             compaction_options: CompactionOptions::NoCompaction,
             enable_wal: false,
             num_memtable_limit: 50,
+            serializable: false,
         }
     }
 
@@ -97,6 +100,7 @@ impl LsmStorageOptions {
             compaction_options: CompactionOptions::NoCompaction,
             enable_wal: false,
             num_memtable_limit: 2,
+            serializable: false,
         }
     }
 
@@ -107,6 +111,7 @@ impl LsmStorageOptions {
             compaction_options,
             enable_wal: false,
             num_memtable_limit: 2,
+            serializable: false,
         }
     }
 }
@@ -235,12 +240,12 @@ impl MiniLsm {
         }))
     }
 
-    pub fn write_batch<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<()> {
-        self.inner.write_batch(batch)
-    }
-
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         self.inner.get(key)
+    }
+
+    pub fn write_batch<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<()> {
+        self.inner.write_batch(batch)
     }
 
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
@@ -253,6 +258,10 @@ impl MiniLsm {
 
     pub fn sync(&self) -> Result<()> {
         self.inner.sync()
+    }
+
+    pub fn new_txn(&self) -> Result<()> {
+        self.inner.new_txn()
     }
 
     pub fn scan(
@@ -363,7 +372,7 @@ impl LsmStorageInner {
                     table_id,
                     Some(block_cache.clone()),
                     FileObject::open(&Self::path_of_sst_static(path, table_id))
-                        .context("failed to open SST")?,
+                        .with_context(|| format!("failed to open SST: {}", table_id))?,
                 )?;
                 state.sstables.insert(table_id, Arc::new(sst));
                 sst_cnt += 1;
@@ -664,6 +673,11 @@ impl LsmStorageInner {
 
         self.sync_dir()?;
 
+        Ok(())
+    }
+
+    pub fn new_txn(&self) -> Result<()> {
+        // no-op
         Ok(())
     }
 

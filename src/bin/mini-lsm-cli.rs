@@ -27,8 +27,10 @@ struct Args {
     path: PathBuf,
     #[arg(long, default_value = "leveled")]
     compaction: CompactionStrategy,
-    #[arg(long, default_value = "true")]
+    #[arg(long)]
     enable_wal: bool,
+    #[arg(long)]
+    serializable: bool,
 }
 
 fn main() -> Result<()> {
@@ -64,6 +66,7 @@ fn main() -> Result<()> {
                 }
             },
             enable_wal: args.enable_wal,
+            serializable: args.serializable,
         },
     )?;
     let mut epoch = 0;

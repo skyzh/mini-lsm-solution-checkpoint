@@ -22,6 +22,7 @@ use crate::key::{self, KeySlice};
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::{Manifest, ManifestRecord};
 use crate::mem_table::{map_bound, map_key_bound_plus_ts, MemTable};
+use crate::mvcc::txn::{Transaction, TxnIterator};
 use crate::mvcc::LsmMvccInner;
 use crate::table::{FileObject, SsTable, SsTableBuilder, SsTableIterator};
 
@@ -187,12 +188,6 @@ impl MiniLsm {
         self.compaction_notifier.send(()).ok();
         self.flush_notifier.send(()).ok();
 
-        if self.inner.options.enable_wal {
-            self.inner.sync()?;
-            self.inner.sync_dir()?;
-            return Ok(());
-        }
-
         let mut compaction_thread = self.compaction_thread.lock();
         if let Some(compaction_thread) = compaction_thread.take() {
             compaction_thread
@@ -204,6 +199,12 @@ impl MiniLsm {
             flush_thread
                 .join()
                 .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+        }
+
+        if self.inner.options.enable_wal {
+            self.inner.sync()?;
+            self.inner.sync_dir()?;
+            return Ok(());
         }
 
         // create memtable and skip updating manifest
@@ -262,15 +263,11 @@ impl MiniLsm {
         self.inner.sync()
     }
 
-    pub fn new_txn(&self) -> Result<()> {
+    pub fn new_txn(&self) -> Result<Arc<Transaction>> {
         self.inner.new_txn()
     }
 
-    pub fn scan(
-        &self,
-        lower: Bound<&[u8]>,
-        upper: Bound<&[u8]>,
-    ) -> Result<FusedIterator<LsmIterator>> {
+    pub fn scan(&self, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> Result<TxnIterator> {
         self.inner.scan(lower, upper)
     }
 
@@ -331,6 +328,7 @@ impl LsmStorageInner {
             std::fs::create_dir_all(path).context("failed to create DB dir")?;
         }
         let manifest_path = path.join("MANIFEST");
+        let mut last_commit_ts = 0;
         if !manifest_path.exists() {
             if options.enable_wal {
                 state.memtable = Arc::new(MemTable::create_with_wal(
@@ -384,6 +382,7 @@ impl LsmStorageInner {
                     FileObject::open(&Self::path_of_sst_static(path, table_id))
                         .context("failed to open SST")?,
                 )?;
+                last_commit_ts = last_commit_ts.max(sst.max_ts());
                 state.sstables.insert(table_id, Arc::new(sst));
                 sst_cnt += 1;
             }
@@ -397,6 +396,13 @@ impl LsmStorageInner {
                 for id in memtables.iter() {
                     let memtable =
                         MemTable::recover_from_wal(*id, Self::path_of_wal_static(path, *id))?;
+                    let max_ts = memtable
+                        .map
+                        .iter()
+                        .map(|x| x.key().ts())
+                        .max()
+                        .unwrap_or_default();
+                    last_commit_ts = last_commit_ts.max(max_ts);
                     if !memtable.is_empty() {
                         state.imm_memtables.insert(0, Arc::new(memtable));
                         wal_cnt += 1;
@@ -424,7 +430,7 @@ impl LsmStorageInner {
             compaction_controller,
             manifest: Some(manifest),
             options: options.into(),
-            mvcc: Some(LsmMvccInner::new(0)),
+            mvcc: Some(LsmMvccInner::new(last_commit_ts)),
         };
         storage.sync_dir()?;
 
@@ -436,7 +442,12 @@ impl LsmStorageInner {
     }
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
-    pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
+    pub fn get(self: &Arc<Self>, key: &[u8]) -> Result<Option<Bytes>> {
+        let txn = self.mvcc().new_txn(self.clone(), self.options.serializable);
+        txn.get(key)
+    }
+
+    pub(crate) fn get_with_ts(&self, key: &[u8], read_ts: u64) -> Result<Option<Bytes>> {
         let snapshot = {
             let guard = self.state.read();
             Arc::clone(&guard)
@@ -506,6 +517,7 @@ impl LsmStorageInner {
                 MergeIterator::create(level_iters),
             )?,
             Bound::Unbounded,
+            read_ts,
         )?;
 
         if iter.is_valid() && iter.key() == key && !iter.value().is_empty() {
@@ -550,13 +562,15 @@ impl LsmStorageInner {
     }
 
     /// Put a key-value pair into the storage by writing into the current memtable.
-    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.write_batch(&[WriteBatchRecord::Put(key, value)])
+    pub fn put(self: &Arc<Self>, key: &[u8], value: &[u8]) -> Result<()> {
+        self.write_batch(&[WriteBatchRecord::Put(key, value)])?;
+        Ok(())
     }
 
     /// Remove a key from the storage by writing an empty value.
-    pub fn delete(&self, key: &[u8]) -> Result<()> {
-        self.write_batch(&[WriteBatchRecord::Del(key)])
+    pub fn delete(self: &Arc<Self>, key: &[u8]) -> Result<()> {
+        self.write_batch(&[WriteBatchRecord::Del(key)])?;
+        Ok(())
     }
 
     fn try_freeze(&self, estimated_size: usize) -> Result<()> {
@@ -689,16 +703,25 @@ impl LsmStorageInner {
         Ok(())
     }
 
-    pub fn new_txn(&self) -> Result<()> {
-        // no-op
-        Ok(())
+    pub fn new_txn(self: &Arc<Self>) -> Result<Arc<Transaction>> {
+        Ok(self.mvcc().new_txn(self.clone(), self.options.serializable))
     }
 
     /// Create an iterator over a range of keys.
-    pub fn scan(
+    pub fn scan<'a>(
+        self: &'a Arc<Self>,
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
+    ) -> Result<TxnIterator> {
+        let txn = self.mvcc().new_txn(self.clone(), self.options.serializable);
+        txn.scan(lower, upper)
+    }
+
+    pub(crate) fn scan_with_ts(
         &self,
         lower: Bound<&[u8]>,
         upper: Bound<&[u8]>,
+        read_ts: u64,
     ) -> Result<FusedIterator<LsmIterator>> {
         let snapshot = {
             let guard = self.state.read();
@@ -791,6 +814,7 @@ impl LsmStorageInner {
         Ok(FusedIterator::new(LsmIterator::new(
             iter,
             map_bound(upper),
+            read_ts,
         )?))
     }
 }

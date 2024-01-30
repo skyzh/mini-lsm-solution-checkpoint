@@ -35,6 +35,10 @@ impl<T: AsRef<[u8]>> Key<T> {
     pub fn is_empty(&self) -> bool {
         self.0.as_ref().is_empty()
     }
+
+    pub fn for_testing_ts(self) -> u64 {
+        self.1
+    }
 }
 
 impl Key<Vec<u8>> {
@@ -91,10 +95,6 @@ impl Key<Vec<u8>> {
     pub fn for_testing_from_vec_no_ts(key: Vec<u8>) -> Self {
         Self(key, TS_DEFAULT)
     }
-
-    pub fn for_testing_ts(self) -> u64 {
-        self.1
-    }
 }
 
 impl Key<Bytes> {
@@ -126,10 +126,6 @@ impl Key<Bytes> {
     pub fn for_testing_key_ref(&self) -> &[u8] {
         self.0.as_ref()
     }
-
-    pub fn for_testing_ts(self) -> u64 {
-        self.1
-    }
 }
 
 impl<'a> Key<&'a [u8]> {
@@ -152,10 +148,6 @@ impl<'a> Key<&'a [u8]> {
 
     pub fn for_testing_key_ref(self) -> &'a [u8] {
         self.0
-    }
-
-    pub fn for_testing_ts(self) -> u64 {
-        self.1
     }
 
     pub fn for_testing_from_slice_no_ts(slice: &'a [u8]) -> Self {

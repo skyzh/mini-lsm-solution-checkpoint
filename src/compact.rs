@@ -144,7 +144,7 @@ impl LsmStorageInner {
                 continue;
             }
 
-            if same_as_last_key && iter.key().ts() < watermark {
+            if same_as_last_key && iter.key().ts() <= watermark {
                 if !first_key_below_watermark {
                     iter.next()?;
                     continue;

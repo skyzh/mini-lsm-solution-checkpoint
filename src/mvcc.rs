@@ -26,6 +26,7 @@ pub(crate) struct CommittedTxnData {
 
 pub(crate) struct LsmMvccInner {
     pub(crate) write_lock: Mutex<()>,
+    pub(crate) commit_lock: Mutex<()>,
     pub(crate) ts: Arc<Mutex<(u64, Watermark)>>,
     pub(crate) committed_txns: Arc<Mutex<BTreeMap<u64, CommittedTxnData>>>,
 }
@@ -34,6 +35,7 @@ impl LsmMvccInner {
     pub fn new(initial_ts: u64) -> Self {
         Self {
             write_lock: Mutex::new(()),
+            commit_lock: Mutex::new(()),
             ts: Arc::new(Mutex::new((initial_ts, Watermark::new()))),
             committed_txns: Arc::new(Mutex::new(BTreeMap::new())),
         }
@@ -62,7 +64,11 @@ impl LsmMvccInner {
             read_ts,
             local_storage: Arc::new(SkipMap::new()),
             committed: Arc::new(AtomicBool::new(false)),
-            key_hashes: None,
+            key_hashes: if serializable {
+                Some(Mutex::new((HashSet::new(), HashSet::new())))
+            } else {
+                None
+            },
         })
     }
 }

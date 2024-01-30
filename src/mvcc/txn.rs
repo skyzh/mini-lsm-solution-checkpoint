@@ -227,7 +227,7 @@ impl TxnIterator {
         txn: Arc<Transaction>,
         iter: TwoMergeIterator<TxnLocalIterator, FusedIterator<LsmIterator>>,
     ) -> Result<Self> {
-        let mut iter = Self { txn: txn, iter };
+        let mut iter = Self { txn, iter };
         iter.skip_deletes()?;
         if iter.is_valid() {
             iter.add_to_read_set(iter.key());

@@ -146,18 +146,43 @@ impl LsmStorageInner {
     fn compact_generate_sst_from_iter(
         &self,
         mut iter: impl for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>,
-        _compact_to_bottom_level: bool,
+        compact_to_bottom_level: bool,
     ) -> Result<Vec<Arc<SsTable>>> {
         let mut builder = None;
         let mut entries_in_builder = 0;
         let mut new_ssts = Vec::new();
+        let watermark = self.mvcc().watermark();
         let mut last_key = Vec::<u8>::new();
+        let mut first_key_below_watermark = false;
 
         while iter.is_valid() {
             if builder.is_none() {
                 builder = Some(SsTableBuilder::new(self.options.block_size));
             }
             let same_as_last_key = iter.key().key_ref() == last_key;
+            if !same_as_last_key {
+                first_key_below_watermark = true;
+            }
+
+            if compact_to_bottom_level
+                && !same_as_last_key
+                && iter.key().ts() <= watermark
+                && iter.value().is_empty()
+            {
+                last_key.clear();
+                last_key.extend(iter.key().key_ref());
+                iter.next()?;
+                first_key_below_watermark = false;
+                continue;
+            }
+
+            if same_as_last_key && iter.key().ts() <= watermark {
+                if !first_key_below_watermark {
+                    iter.next()?;
+                    continue;
+                }
+                first_key_below_watermark = false;
+            }
 
             if entries_in_builder > 0
                 && builder.as_ref().unwrap().estimated_size() >= self.options.target_sst_size

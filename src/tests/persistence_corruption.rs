@@ -160,8 +160,11 @@ fn checkpoint_wal_round_trip_corruption_and_truncation() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("00000.wal");
     let wal = Wal::create(&path).unwrap();
-    wal.put(KeySlice::from_slice_with_ts(b"key", TS_DEFAULT), b"value")
-        .unwrap();
+    wal.put_batch(&[
+        (KeySlice::from_slice_with_ts(b"key", TS_DEFAULT), b"value"),
+        (KeySlice::from_slice_with_ts(b"deleted", TS_DEFAULT), b""),
+    ])
+    .unwrap();
     wal.sync().unwrap();
     drop(wal);
     let original = std::fs::read(&path).unwrap();
@@ -178,16 +181,26 @@ fn checkpoint_wal_round_trip_corruption_and_truncation() {
             .as_ref(),
         b"value"
     );
+    assert!(
+        recovered
+            .get(&KeyBytes::from_bytes_with_ts(
+                Bytes::from_static(b"deleted"),
+                TS_DEFAULT,
+            ))
+            .unwrap()
+            .value()
+            .is_empty()
+    );
 
     let flipped_path = dir.path().join("flipped.wal");
     let mut flipped = original.clone();
-    flipped[2] ^= 1;
+    flipped[std::mem::size_of::<u32>() + std::mem::size_of::<u16>()] ^= 1;
     std::fs::write(&flipped_path, flipped).unwrap();
     assert!(Wal::recover(&flipped_path, &SkipMap::new()).is_err());
 
     let bounded_path = dir.path().join("bounded.wal");
     let mut bounded = original.clone();
-    bounded[..2].copy_from_slice(&u16::MAX.to_be_bytes());
+    bounded[..4].copy_from_slice(&u32::MAX.to_be_bytes());
     std::fs::write(&bounded_path, bounded).unwrap();
     Wal::recover(&bounded_path, &SkipMap::new()).unwrap();
     assert_eq!(std::fs::metadata(&bounded_path).unwrap().len(), 0);

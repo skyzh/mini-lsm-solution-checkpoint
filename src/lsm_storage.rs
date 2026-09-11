@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
@@ -86,6 +86,36 @@ pub struct LsmStorageState {
 pub enum WriteBatchRecord<T: AsRef<[u8]>> {
     Put(T, T),
     Del(T),
+}
+
+fn validate_write_batch<T: AsRef<[u8]>>(batch: &[WriteBatchRecord<T>]) -> Result<()> {
+    let mut encoded_batch_len = 0usize;
+    for record in batch {
+        let (key, value) = match record {
+            WriteBatchRecord::Put(key, value) => (key.as_ref(), value.as_ref()),
+            WriteBatchRecord::Del(key) => (key.as_ref(), &[][..]),
+        };
+        ensure!(
+            u16::try_from(key.len()).is_ok(),
+            "key is too large for the on-disk format"
+        );
+        ensure!(
+            u16::try_from(value.len()).is_ok(),
+            "value is too large for the on-disk format"
+        );
+        encoded_batch_len = encoded_batch_len
+            .checked_add(std::mem::size_of::<u16>())
+            .and_then(|len| len.checked_add(key.len()))
+            .and_then(|len| len.checked_add(std::mem::size_of::<u64>()))
+            .and_then(|len| len.checked_add(std::mem::size_of::<u16>()))
+            .and_then(|len| len.checked_add(value.len()))
+            .context("write batch size overflow")?;
+    }
+    ensure!(
+        u32::try_from(encoded_batch_len).is_ok(),
+        "write batch is too large for the on-disk format"
+    );
+    Ok(())
 }
 
 impl LsmStorageState {
@@ -534,30 +564,32 @@ impl LsmStorageInner {
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
     pub fn write_batch<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        validate_write_batch(batch)?;
         let _write_lock = self.mvcc().write_lock.lock();
         let ts = self.mvcc().latest_commit_ts() + 1;
-        let estimated_size = {
-            let state = self.state.read();
-            for record in batch {
-                match record {
-                    WriteBatchRecord::Put(key, value) => {
-                        let key = key.as_ref();
-                        let value = value.as_ref();
-                        assert!(!key.is_empty(), "key cannot be empty");
-                        assert!(!value.is_empty(), "value cannot be empty");
-                        state
-                            .memtable
-                            .put(KeySlice::from_slice_with_ts(key, ts), value)?;
-                    }
-                    WriteBatchRecord::Del(key) => {
-                        let key = key.as_ref();
-                        assert!(!key.is_empty(), "key cannot be empty");
-                        state
-                            .memtable
-                            .put(KeySlice::from_slice_with_ts(key, ts), b"")?;
-                    }
+        let mut batch_data = Vec::with_capacity(batch.len());
+        for record in batch {
+            match record {
+                WriteBatchRecord::Put(key, value) => {
+                    let key = key.as_ref();
+                    let value = value.as_ref();
+                    assert!(!key.is_empty(), "key cannot be empty");
+                    assert!(!value.is_empty(), "value cannot be empty");
+                    batch_data.push((KeySlice::from_slice_with_ts(key, ts), value));
+                }
+                WriteBatchRecord::Del(key) => {
+                    let key = key.as_ref();
+                    assert!(!key.is_empty(), "key cannot be empty");
+                    batch_data.push((KeySlice::from_slice_with_ts(key, ts), b"".as_slice()));
                 }
             }
+        }
+        let estimated_size = {
+            let state = self.state.read();
+            state.memtable.put_batch(&batch_data)?;
             state.memtable.approximate_size()
         };
         self.mvcc().update_commit_ts(ts);

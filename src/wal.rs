@@ -11,14 +11,12 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
-use anyhow::{Context, Result, bail};
-use bytes::{BufMut, Bytes};
+use anyhow::{Context, Result, bail, ensure};
+use bytes::{Buf, BufMut, Bytes};
 use crossbeam_skiplist::SkipMap;
 use parking_lot::Mutex;
 use std::fs::{File, OpenOptions};
+use std::hash::Hasher;
 use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
@@ -46,6 +44,7 @@ impl Wal {
 
     /// Week 2 Day 6: recover entries from a write-ahead log.
     pub fn recover(path: impl AsRef<Path>, skiplist: &SkipMap<KeyBytes, Bytes>) -> Result<Self> {
+        let path = path.as_ref();
         let mut file = OpenOptions::new()
             .read(true)
             .append(true)
@@ -53,54 +52,66 @@ impl Wal {
             .context("failed to recover WAL")?;
         let mut buf = Vec::new();
         file.read_to_end(&mut buf)?;
-        let mut valid_len = 0usize;
-        while valid_len < buf.len() {
-            let remaining = &buf[valid_len..];
-            if remaining.len() < std::mem::size_of::<u16>() {
+        let mut remaining: &[u8] = &buf;
+        let mut valid_len = 0;
+        let mut has_truncated_tail = false;
+        while remaining.has_remaining() {
+            if remaining.remaining() < std::mem::size_of::<u32>() {
+                has_truncated_tail = true;
                 break;
             }
-            let key_len = u16::from_be_bytes([remaining[0], remaining[1]]) as usize;
-            let Some(key_end) = std::mem::size_of::<u16>().checked_add(key_len) else {
-                break;
-            };
-            let Some(value_len_offset) = key_end.checked_add(std::mem::size_of::<u64>()) else {
-                break;
-            };
-            let Some(value_offset) = value_len_offset.checked_add(std::mem::size_of::<u16>())
-            else {
-                break;
-            };
-            if remaining.len() < value_offset {
+            let batch_size = remaining.get_u32() as usize;
+            if batch_size
+                > remaining
+                    .remaining()
+                    .saturating_sub(std::mem::size_of::<u32>())
+            {
+                has_truncated_tail = true;
                 break;
             }
-            let value_len =
-                u16::from_be_bytes([remaining[value_len_offset], remaining[value_len_offset + 1]])
-                    as usize;
-            let Some(checksum_offset) = value_offset.checked_add(value_len) else {
-                break;
-            };
-            let Some(record_len) = checksum_offset.checked_add(std::mem::size_of::<u32>()) else {
-                break;
-            };
-            if remaining.len() < record_len {
-                break;
+            let mut batch = &remaining[..batch_size];
+            let checksum = crc32fast::hash(batch);
+            let mut component_hasher = crc32fast::Hasher::new();
+            let mut records = Vec::new();
+            while batch.has_remaining() {
+                ensure!(
+                    batch.remaining() >= std::mem::size_of::<u16>(),
+                    "incomplete WAL key length"
+                );
+                let key_len = batch.get_u16() as usize;
+                component_hasher.write(&(key_len as u16).to_be_bytes());
+                ensure!(
+                    batch.remaining()
+                        >= key_len + std::mem::size_of::<u64>() + std::mem::size_of::<u16>(),
+                    "incomplete WAL key"
+                );
+                let key = Bytes::copy_from_slice(&batch[..key_len]);
+                component_hasher.write(&key);
+                batch.advance(key_len);
+                let ts = batch.get_u64();
+                component_hasher.write(&ts.to_be_bytes());
+                let value_len = batch.get_u16() as usize;
+                component_hasher.write(&(value_len as u16).to_be_bytes());
+                ensure!(batch.remaining() >= value_len, "incomplete WAL value");
+                let value = Bytes::copy_from_slice(&batch[..value_len]);
+                component_hasher.write(&value);
+                batch.advance(value_len);
+                records.push((key, ts, value));
             }
-            let expected_checksum = u32::from_be_bytes([
-                remaining[checksum_offset],
-                remaining[checksum_offset + 1],
-                remaining[checksum_offset + 2],
-                remaining[checksum_offset + 3],
-            ]);
-            if crc32fast::hash(&remaining[..checksum_offset]) != expected_checksum {
+            ensure!(
+                component_hasher.finalize() == checksum,
+                "WAL component checksum disagrees with frame checksum"
+            );
+            remaining.advance(batch_size);
+            if remaining.get_u32() != checksum {
                 bail!("WAL checksum mismatched at byte offset {valid_len}");
             }
-            let key = Bytes::copy_from_slice(&remaining[2..key_end]);
-            let ts = u64::from_be_bytes(remaining[key_end..value_len_offset].try_into().unwrap());
-            let value = Bytes::copy_from_slice(&remaining[value_offset..checksum_offset]);
-            skiplist.insert(KeyBytes::from_bytes_with_ts(key, ts), value);
-            valid_len += record_len;
+            for (key, ts, value) in records {
+                skiplist.insert(KeyBytes::from_bytes_with_ts(key, ts), value);
+            }
+            valid_len = buf.len() - remaining.len();
         }
-        if valid_len < buf.len() {
+        if has_truncated_tail {
             file.set_len(valid_len as u64)
                 .context("failed to truncate incomplete WAL tail")?;
             file.sync_all()
@@ -113,27 +124,29 @@ impl Wal {
 
     /// Week 2 Day 6: append a key-value pair to the write-ahead log.
     pub fn put(&self, key: KeySlice, value: &[u8]) -> Result<()> {
-        let key_len = u16::try_from(key.key_len()).context("WAL key is too large")?;
-        let value_len = u16::try_from(value.len()).context("WAL value is too large")?;
-        let mut buf = Vec::with_capacity(
-            key.raw_len()
-                + value.len()
-                + std::mem::size_of::<u16>() * 2
-                + std::mem::size_of::<u32>(),
-        );
-        buf.put_u16(key_len);
-        buf.put_slice(key.key_ref());
-        buf.put_u64(key.ts());
-        buf.put_u16(value_len);
-        buf.put_slice(value);
-        buf.put_u32(crc32fast::hash(&buf));
-        self.file.lock().write_all(&buf)?;
-        Ok(())
+        self.put_batch(&[(key, value)])
     }
 
     /// Week 3 Day 5: append a batch of key-value pairs.
-    pub fn put_batch(&self, _data: &[(KeySlice, &[u8])]) -> Result<()> {
-        unimplemented!()
+    pub fn put_batch(&self, data: &[(KeySlice, &[u8])]) -> Result<()> {
+        let mut payload = Vec::new();
+        for (key, value) in data {
+            let key_len = u16::try_from(key.key_len()).context("WAL key is too large")?;
+            let value_len = u16::try_from(value.len()).context("WAL value is too large")?;
+            payload.put_u16(key_len);
+            payload.put_slice(key.key_ref());
+            payload.put_u64(key.ts());
+            payload.put_u16(value_len);
+            payload.put_slice(value);
+        }
+        let batch_size = u32::try_from(payload.len()).context("WAL batch is too large")?;
+        let checksum = crc32fast::hash(&payload);
+        let mut frame = Vec::with_capacity(std::mem::size_of::<u32>() * 2 + payload.len());
+        frame.put_u32(batch_size);
+        frame.put_slice(&payload);
+        frame.put_u32(checksum);
+        self.file.lock().write_all(&frame)?;
+        Ok(())
     }
 
     /// Week 2 Day 6: synchronize the write-ahead log to storage.

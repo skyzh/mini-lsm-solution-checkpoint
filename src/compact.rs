@@ -230,6 +230,40 @@ impl LsmStorageInner {
                     )
                 }
             }
+            CompactionTask::Leveled(LeveledCompactionTask {
+                upper_level,
+                upper_level_sst_ids,
+                lower_level_sst_ids,
+                ..
+            }) => {
+                let lower_ssts = lower_level_sst_ids
+                    .iter()
+                    .map(|id| snapshot.sstables[id].clone())
+                    .collect();
+                let lower_iter = SstConcatIterator::create_and_seek_to_first(lower_ssts)?;
+                if upper_level.is_some() {
+                    let upper_ssts = upper_level_sst_ids
+                        .iter()
+                        .map(|id| snapshot.sstables[id].clone())
+                        .collect();
+                    let upper_iter = SstConcatIterator::create_and_seek_to_first(upper_ssts)?;
+                    self.compact_generate_sst_from_iter(
+                        TwoMergeIterator::create(upper_iter, lower_iter)?,
+                        task.compact_to_bottom_level(),
+                    )
+                } else {
+                    let mut upper_iters = Vec::with_capacity(upper_level_sst_ids.len());
+                    for id in upper_level_sst_ids {
+                        upper_iters.push(Box::new(SsTableIterator::create_and_seek_to_first(
+                            snapshot.sstables[id].clone(),
+                        )?));
+                    }
+                    self.compact_generate_sst_from_iter(
+                        TwoMergeIterator::create(MergeIterator::create(upper_iters), lower_iter)?,
+                        task.compact_to_bottom_level(),
+                    )
+                }
+            }
             CompactionTask::Tiered(TieredCompactionTask { tiers, .. }) => {
                 let mut tier_iters = Vec::with_capacity(tiers.len());
                 for (_, tier_sst_ids) in tiers {
@@ -244,7 +278,6 @@ impl LsmStorageInner {
                     task.compact_to_bottom_level(),
                 )
             }
-            _ => unimplemented!(),
         }
     }
 

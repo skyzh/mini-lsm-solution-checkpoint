@@ -20,9 +20,10 @@ pub mod watermark;
 
 use std::{
     collections::{BTreeMap, HashSet},
-    sync::Arc,
+    sync::{Arc, atomic::AtomicBool},
 };
 
+use crossbeam_skiplist::SkipMap;
 use parking_lot::Mutex;
 
 use self::{txn::Transaction, watermark::Watermark};
@@ -68,6 +69,13 @@ impl LsmMvccInner {
     }
 
     pub fn new_txn(&self, inner: Arc<LsmStorageInner>, serializable: bool) -> Arc<Transaction> {
-        unimplemented!()
+        let read_ts = self.ts.lock().0;
+        Arc::new(Transaction {
+            inner,
+            read_ts,
+            local_storage: Arc::new(SkipMap::new()),
+            committed: Arc::new(AtomicBool::new(false)),
+            key_hashes: None,
+        })
     }
 }

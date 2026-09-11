@@ -70,7 +70,11 @@ impl BlockMeta {
     /// Encode block meta to a buffer.
     /// You may add extra fields to the buffer,
     /// in order to help keep track of `first_key` when decoding from the same buffer in the future.
-    pub fn encode_block_meta(block_meta: &[BlockMeta], buf: &mut Vec<u8>) -> Result<()> {
+    pub fn encode_block_meta(
+        block_meta: &[BlockMeta],
+        max_ts: u64,
+        buf: &mut Vec<u8>,
+    ) -> Result<()> {
         let original_len = buf.len();
         buf.put_u32(u32::try_from(block_meta.len()).context("too many SST blocks")?);
         for meta in block_meta {
@@ -86,6 +90,7 @@ impl BlockMeta {
             buf.put_slice(meta.last_key.key_ref());
             buf.put_u64(meta.last_key.ts());
         }
+        buf.put_u64(max_ts);
         buf.put_u32(crc32fast::hash(
             &buf[original_len + std::mem::size_of::<u32>()..],
         ));
@@ -93,9 +98,9 @@ impl BlockMeta {
     }
 
     /// Decode block meta from a buffer.
-    pub fn decode_block_meta(buf: &[u8]) -> Result<Vec<BlockMeta>> {
+    pub fn decode_block_meta(buf: &[u8]) -> Result<(Vec<BlockMeta>, u64)> {
         ensure!(
-            buf.len() >= std::mem::size_of::<u32>() * 2,
+            buf.len() >= std::mem::size_of::<u32>() * 2 + std::mem::size_of::<u64>(),
             "SST block metadata is truncated"
         );
         let checksum_offset = buf.len() - std::mem::size_of::<u32>();
@@ -143,14 +148,15 @@ impl BlockMeta {
             });
         }
         ensure!(
-            cursor.len() == std::mem::size_of::<u32>(),
+            cursor.len() == std::mem::size_of::<u64>() + std::mem::size_of::<u32>(),
             "SST block metadata has trailing or missing bytes"
         );
+        let max_ts = take_u64(&mut cursor, "SST maximum timestamp")?;
         ensure!(
             take_u32(&mut cursor, "SST metadata checksum")? == checksum,
             "SST metadata checksum mismatched"
         );
-        Ok(block_meta)
+        Ok((block_meta, max_ts))
     }
 }
 
@@ -251,7 +257,7 @@ impl SsTable {
             "SST block-metadata offset is out of bounds"
         );
         let raw_meta = file.read(block_meta_offset, meta_trailer_offset - block_meta_offset)?;
-        let block_meta = BlockMeta::decode_block_meta(&raw_meta)?;
+        let (block_meta, max_ts) = BlockMeta::decode_block_meta(&raw_meta)?;
         ensure!(!block_meta.is_empty(), "SST has no data blocks");
         ensure!(
             block_meta[0].offset == 0,
@@ -282,7 +288,7 @@ impl SsTable {
             id,
             block_cache,
             bloom: Some(bloom),
-            max_ts: 0,
+            max_ts,
         })
     }
 

@@ -30,12 +30,14 @@ use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
+use crate::iterators::StorageIterator;
 use crate::iterators::merge_iterator::MergeIterator;
+use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
-use crate::mem_table::MemTable;
+use crate::mem_table::{MemTable, map_bound};
 use crate::mvcc::LsmMvccInner;
-use crate::table::SsTable;
+use crate::table::{SsTable, SsTableIterator};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -308,6 +310,19 @@ impl LsmStorageInner {
                 return Ok((!value.is_empty()).then_some(value));
             }
         }
+        for table_id in snapshot
+            .l0_sstables
+            .iter()
+            .chain(snapshot.levels.iter().flat_map(|(_, tables)| tables))
+        {
+            let iter = SsTableIterator::create_and_seek_to_key(
+                snapshot.sstables[table_id].clone(),
+                crate::key::KeySlice::from_slice(key),
+            )?;
+            if iter.is_valid() && iter.key().raw_ref() == key {
+                return Ok((!iter.value().is_empty()).then(|| Bytes::copy_from_slice(iter.value())));
+            }
+        }
         Ok(None)
     }
 
@@ -404,7 +419,39 @@ impl LsmStorageInner {
         for memtable in &snapshot.imm_memtables {
             memtable_iters.push(Box::new(memtable.scan(lower, upper)));
         }
-        let iter = MergeIterator::create(memtable_iters);
-        Ok(FusedIterator::new(LsmIterator::new(iter)?))
+        let memtable_iter = MergeIterator::create(memtable_iters);
+
+        let mut table_iters = Vec::new();
+        for table_id in snapshot
+            .l0_sstables
+            .iter()
+            .chain(snapshot.levels.iter().flat_map(|(_, tables)| tables))
+        {
+            let table = snapshot.sstables[table_id].clone();
+            let iter = match lower {
+                Bound::Included(key) => SsTableIterator::create_and_seek_to_key(
+                    table,
+                    crate::key::KeySlice::from_slice(key),
+                )?,
+                Bound::Excluded(key) => {
+                    let mut iter = SsTableIterator::create_and_seek_to_key(
+                        table,
+                        crate::key::KeySlice::from_slice(key),
+                    )?;
+                    if iter.is_valid() && iter.key().raw_ref() == key {
+                        iter.next()?;
+                    }
+                    iter
+                }
+                Bound::Unbounded => SsTableIterator::create_and_seek_to_first(table)?,
+            };
+            table_iters.push(Box::new(iter));
+        }
+        let table_iter = MergeIterator::create(table_iters);
+        let iter = TwoMergeIterator::create(memtable_iter, table_iter)?;
+        Ok(FusedIterator::new(LsmIterator::new(
+            iter,
+            map_bound(upper),
+        )?))
     }
 }

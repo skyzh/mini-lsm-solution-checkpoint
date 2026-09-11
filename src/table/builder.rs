@@ -23,13 +23,17 @@ use bytes::BufMut;
 
 use super::bloom::Bloom;
 use super::{BlockMeta, FileObject, SsTable};
-use crate::{block::BlockBuilder, key::KeySlice, lsm_storage::BlockCache};
+use crate::{
+    block::BlockBuilder,
+    key::{KeySlice, KeyVec},
+    lsm_storage::BlockCache,
+};
 
 /// Builds an SSTable from key-value pairs.
 pub struct SsTableBuilder {
     builder: BlockBuilder,
-    first_key: Vec<u8>,
-    last_key: Vec<u8>,
+    first_key: KeyVec,
+    last_key: KeyVec,
     data: Vec<u8>,
     pub(crate) meta: Vec<BlockMeta>,
     block_size: usize,
@@ -41,8 +45,8 @@ impl SsTableBuilder {
     pub fn new(block_size: usize) -> Self {
         Self {
             builder: BlockBuilder::new(block_size),
-            first_key: Vec::new(),
-            last_key: Vec::new(),
+            first_key: KeyVec::new(),
+            last_key: KeyVec::new(),
             data: Vec::new(),
             meta: Vec::new(),
             block_size,
@@ -55,20 +59,19 @@ impl SsTableBuilder {
     /// Note: You should split a new block when the current block is full.(`std::mem::replace` may
     /// be helpful here)
     pub fn add(&mut self, key: KeySlice, value: &[u8]) {
-        self.key_hashes.push(farmhash::fingerprint32(key.raw_ref()));
+        self.key_hashes.push(farmhash::fingerprint32(key.key_ref()));
         if self.first_key.is_empty() {
-            self.first_key.extend_from_slice(key.raw_ref());
+            self.first_key.set_from_slice(key);
         }
         if self.builder.add(key, value) {
-            self.last_key.clear();
-            self.last_key.extend_from_slice(key.raw_ref());
+            self.last_key.set_from_slice(key);
             return;
         }
 
         self.finish_block();
         assert!(self.builder.add(key, value));
-        self.first_key.extend_from_slice(key.raw_ref());
-        self.last_key.extend_from_slice(key.raw_ref());
+        self.first_key.set_from_slice(key);
+        self.last_key.set_from_slice(key);
     }
 
     /// Get the estimated size of the SSTable.
@@ -84,8 +87,8 @@ impl SsTableBuilder {
         let encoded_block = builder.build().encode();
         self.meta.push(BlockMeta {
             offset: self.data.len(),
-            first_key: crate::key::KeyBytes::from_bytes(std::mem::take(&mut self.first_key).into()),
-            last_key: crate::key::KeyBytes::from_bytes(std::mem::take(&mut self.last_key).into()),
+            first_key: std::mem::take(&mut self.first_key).into_key_bytes(),
+            last_key: std::mem::take(&mut self.last_key).into_key_bytes(),
         });
         self.data.extend_from_slice(&encoded_block);
         self.data.put_u32(crc32fast::hash(&encoded_block));

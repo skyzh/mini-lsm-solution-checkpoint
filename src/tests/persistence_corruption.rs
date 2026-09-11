@@ -19,7 +19,7 @@ use crossbeam_skiplist::SkipMap;
 use tempfile::tempdir;
 
 use crate::block::Block;
-use crate::key::KeySlice;
+use crate::key::{KeySlice, TS_DEFAULT};
 use crate::lsm_storage::{LsmStorageOptions, MiniLsm, WriteBatchRecord};
 use crate::manifest::{Manifest, ManifestRecord};
 use crate::table::bloom::Bloom;
@@ -37,8 +37,8 @@ fn read_u32(buf: &[u8], offset: usize) -> usize {
 
 fn build_sst(path: &Path) {
     let mut builder = SsTableBuilder::new(64);
-    builder.add(KeySlice::from_slice(b"key1"), b"value1");
-    builder.add(KeySlice::from_slice(b"key2"), b"value2");
+    builder.add(KeySlice::from_slice_with_ts(b"key1", TS_DEFAULT), b"value1");
+    builder.add(KeySlice::from_slice_with_ts(b"key2", TS_DEFAULT), b"value2");
     builder.build_for_test(path).unwrap();
 }
 

@@ -51,6 +51,11 @@ fn take_u32(buf: &mut &[u8], what: &str) -> Result<u32> {
     Ok(u32::from_be_bytes([value[0], value[1], value[2], value[3]]))
 }
 
+fn take_u64(buf: &mut &[u8], what: &str) -> Result<u64> {
+    let value = take_bytes(buf, std::mem::size_of::<u64>(), what)?;
+    Ok(u64::from_be_bytes(value.try_into().unwrap()))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockMeta {
     /// Offset of this data block.
@@ -70,10 +75,16 @@ impl BlockMeta {
         buf.put_u32(u32::try_from(block_meta.len()).context("too many SST blocks")?);
         for meta in block_meta {
             buf.put_u32(u32::try_from(meta.offset).context("SST block offset is too large")?);
-            buf.put_u16(u16::try_from(meta.first_key.len()).context("SST first key is too large")?);
-            buf.put_slice(meta.first_key.raw_ref());
-            buf.put_u16(u16::try_from(meta.last_key.len()).context("SST last key is too large")?);
-            buf.put_slice(meta.last_key.raw_ref());
+            buf.put_u16(
+                u16::try_from(meta.first_key.key_len()).context("SST first key is too large")?,
+            );
+            buf.put_slice(meta.first_key.key_ref());
+            buf.put_u64(meta.first_key.ts());
+            buf.put_u16(
+                u16::try_from(meta.last_key.key_len()).context("SST last key is too large")?,
+            );
+            buf.put_slice(meta.last_key.key_ref());
+            buf.put_u64(meta.last_key.ts());
         }
         buf.put_u32(crc32fast::hash(
             &buf[original_len + std::mem::size_of::<u32>()..],
@@ -102,7 +113,9 @@ impl BlockMeta {
 
         let mut cursor = buf;
         let count = take_u32(&mut cursor, "SST block count")? as usize;
-        let minimum_entry_size = std::mem::size_of::<u32>() + std::mem::size_of::<u16>() * 2;
+        let minimum_entry_size = std::mem::size_of::<u32>()
+            + std::mem::size_of::<u16>() * 2
+            + std::mem::size_of::<u64>() * 2;
         ensure!(
             count
                 <= checksum_offset.saturating_sub(std::mem::size_of::<u32>()) / minimum_entry_size,
@@ -113,18 +126,16 @@ impl BlockMeta {
             let offset = take_u32(&mut cursor, "SST block offset")? as usize;
             let first_key_len = take_u16(&mut cursor, "SST first-key length")? as usize;
             ensure!(first_key_len > 0, "SST first key is empty");
-            let first_key = KeyBytes::from_bytes(
-                take_bytes(&mut cursor, first_key_len, "SST first key")?
-                    .to_vec()
-                    .into(),
-            );
+            let first_key_bytes = take_bytes(&mut cursor, first_key_len, "SST first key")?;
+            let first_key_ts = take_u64(&mut cursor, "SST first-key timestamp")?;
+            let first_key =
+                KeyBytes::from_bytes_with_ts(first_key_bytes.to_vec().into(), first_key_ts);
             let last_key_len = take_u16(&mut cursor, "SST last-key length")? as usize;
             ensure!(last_key_len > 0, "SST last key is empty");
-            let last_key = KeyBytes::from_bytes(
-                take_bytes(&mut cursor, last_key_len, "SST last key")?
-                    .to_vec()
-                    .into(),
-            );
+            let last_key_bytes = take_bytes(&mut cursor, last_key_len, "SST last key")?;
+            let last_key_ts = take_u64(&mut cursor, "SST last-key timestamp")?;
+            let last_key =
+                KeyBytes::from_bytes_with_ts(last_key_bytes.to_vec().into(), last_key_ts);
             block_meta.push(BlockMeta {
                 offset,
                 first_key,

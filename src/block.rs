@@ -81,7 +81,10 @@ impl Block {
                 .get(idx + 1)
                 .map_or(data_end, |offset| usize::from(*offset));
             let entry = &data[entry_start..entry_end];
-            ensure!(entry.len() >= 6, "block entry header is truncated");
+            ensure!(
+                entry.len() >= 4 + std::mem::size_of::<u64>() + SIZEOF_U16,
+                "block entry header is truncated"
+            );
             let overlap = u16::from_be_bytes([entry[0], entry[1]]) as usize;
             let key_len = u16::from_be_bytes([entry[2], entry[3]]) as usize;
             if idx == 0 {
@@ -96,14 +99,18 @@ impl Block {
             let key_end = 4usize
                 .checked_add(key_len)
                 .context("block key length overflow")?;
-            let value_len_end = key_end
+            let timestamp_end = key_end
+                .checked_add(std::mem::size_of::<u64>())
+                .context("block timestamp overflow")?;
+            let value_len_end = timestamp_end
                 .checked_add(SIZEOF_U16)
                 .context("block value header overflow")?;
             ensure!(
                 value_len_end <= entry.len(),
                 "block key or value length is truncated"
             );
-            let value_len = u16::from_be_bytes([entry[key_end], entry[key_end + 1]]) as usize;
+            let value_len =
+                u16::from_be_bytes([entry[timestamp_end], entry[timestamp_end + 1]]) as usize;
             let entry_len = value_len_end
                 .checked_add(value_len)
                 .context("block value length overflow")?;

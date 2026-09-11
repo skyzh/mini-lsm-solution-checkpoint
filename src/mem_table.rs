@@ -52,8 +52,13 @@ pub(crate) fn map_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
 
 impl MemTable {
     /// Week 1 Day 1: create the plain in-memory memtable.
-    pub fn create(_id: usize) -> Self {
-        unimplemented!()
+    pub fn create(id: usize) -> Self {
+        Self {
+            map: Arc::new(SkipMap::new()),
+            wal: None,
+            id,
+            approximate_size: Arc::new(AtomicUsize::new(0)),
+        }
     }
 
     /// Week 2 Day 6: create a memtable backed by a write-ahead log.
@@ -86,8 +91,8 @@ impl MemTable {
     }
 
     /// Week 1 Day 1: get a value by key.
-    pub fn get(&self, _key: &[u8]) -> Option<Bytes> {
-        unimplemented!()
+    pub fn get(&self, key: &[u8]) -> Option<Bytes> {
+        self.map.get(key).map(|entry| entry.value().clone())
     }
 
     /// Put a key-value pair into the memtable.
@@ -95,8 +100,14 @@ impl MemTable {
     /// Week 1 Day 1: put the key-value pair into the in-memory map.
     /// Week 2 Day 6: also append the data to the write-ahead log.
     /// Week 3 Day 5: route the write through the batch WAL implementation.
-    pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        unimplemented!()
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        self.approximate_size.fetch_add(
+            key.len() + value.len(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.map
+            .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
+        Ok(())
     }
 
     /// Week 3 Day 5: put a batch of key-value pairs.

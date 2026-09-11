@@ -23,6 +23,15 @@ use crate::key::{KeySlice, KeyVec};
 
 use super::{Block, SIZEOF_U16};
 
+impl Block {
+    fn get_first_key(&self) -> KeyVec {
+        let mut entry = &self.data[..];
+        entry.get_u16();
+        let key_len = entry.get_u16() as usize;
+        KeyVec::from_vec(entry[..key_len].to_vec())
+    }
+}
+
 /// Iterates on a block.
 pub struct BlockIterator {
     /// The internal `Block`, wrapped by an `Arc`
@@ -40,11 +49,11 @@ pub struct BlockIterator {
 impl BlockIterator {
     fn new(block: Arc<Block>) -> Self {
         Self {
+            first_key: block.get_first_key(),
             block,
             key: KeyVec::new(),
             value_range: (0, 0),
             idx: 0,
-            first_key: KeyVec::new(),
         }
     }
 
@@ -93,12 +102,14 @@ impl BlockIterator {
         }
         let offset = self.block.offsets[idx] as usize;
         let mut entry = &self.block.data[offset..];
+        let overlap_len = entry.get_u16() as usize;
         let key_len = entry.get_u16() as usize;
         self.key.clear();
+        self.key.append(&self.first_key.raw_ref()[..overlap_len]);
         self.key.append(&entry[..key_len]);
         entry.advance(key_len);
         let value_len = entry.get_u16() as usize;
-        let value_offset = offset + SIZEOF_U16 + key_len + SIZEOF_U16;
+        let value_offset = offset + SIZEOF_U16 * 3 + key_len;
         self.value_range = (value_offset, value_offset + value_len);
         self.idx = idx;
     }

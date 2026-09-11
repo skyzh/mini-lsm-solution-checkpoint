@@ -33,7 +33,7 @@ use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::key::KeySlice;
-use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
+use crate::lsm_storage::{CompactionFilter, LsmStorageInner, LsmStorageState};
 use crate::manifest::ManifestRecord;
 use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
@@ -154,8 +154,9 @@ impl LsmStorageInner {
         let watermark = self.mvcc().watermark();
         let mut last_key = Vec::<u8>::new();
         let mut first_key_below_watermark = false;
+        let compaction_filters = self.compaction_filters.lock().clone();
 
-        while iter.is_valid() {
+        'outer: while iter.is_valid() {
             if builder.is_none() {
                 builder = Some(SsTableBuilder::new(self.options.block_size));
             }
@@ -176,12 +177,24 @@ impl LsmStorageInner {
                 continue;
             }
 
-            if same_as_last_key && iter.key().ts() <= watermark {
-                if !first_key_below_watermark {
+            if iter.key().ts() <= watermark {
+                if same_as_last_key && !first_key_below_watermark {
                     iter.next()?;
                     continue;
                 }
                 first_key_below_watermark = false;
+
+                for filter in &compaction_filters {
+                    match filter {
+                        CompactionFilter::Prefix(prefix)
+                            if iter.key().key_ref().starts_with(prefix) =>
+                        {
+                            iter.next()?;
+                            continue 'outer;
+                        }
+                        CompactionFilter::Prefix(_) => {}
+                    }
+                }
             }
 
             if entries_in_builder > 0

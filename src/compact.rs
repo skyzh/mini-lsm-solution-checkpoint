@@ -230,6 +230,20 @@ impl LsmStorageInner {
                     )
                 }
             }
+            CompactionTask::Tiered(TieredCompactionTask { tiers, .. }) => {
+                let mut tier_iters = Vec::with_capacity(tiers.len());
+                for (_, tier_sst_ids) in tiers {
+                    let ssts = tier_sst_ids
+                        .iter()
+                        .map(|id| snapshot.sstables[id].clone())
+                        .collect();
+                    tier_iters.push(Box::new(SstConcatIterator::create_and_seek_to_first(ssts)?));
+                }
+                self.compact_generate_sst_from_iter(
+                    MergeIterator::create(tier_iters),
+                    task.compact_to_bottom_level(),
+                )
+            }
             _ => unimplemented!(),
         }
     }

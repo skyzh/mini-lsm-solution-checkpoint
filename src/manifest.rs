@@ -20,7 +20,8 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use bytes::BufMut;
 use parking_lot::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 
@@ -59,9 +60,60 @@ impl Manifest {
             .context("failed to recover manifest")?;
         let mut buf = Vec::new();
         file.read_to_end(&mut buf)?;
-        let records = serde_json::Deserializer::from_slice(&buf)
-            .into_iter::<ManifestRecord>()
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut records = Vec::new();
+        let mut valid_len = 0usize;
+        while valid_len < buf.len() {
+            let remaining = &buf[valid_len..];
+            if remaining.len() < std::mem::size_of::<u64>() {
+                break;
+            }
+            let len = u64::from_be_bytes([
+                remaining[0],
+                remaining[1],
+                remaining[2],
+                remaining[3],
+                remaining[4],
+                remaining[5],
+                remaining[6],
+                remaining[7],
+            ]);
+            let Ok(len) = usize::try_from(len) else {
+                break;
+            };
+            let Some(frame_len) = std::mem::size_of::<u64>()
+                .checked_add(len)
+                .and_then(|len| len.checked_add(std::mem::size_of::<u32>()))
+            else {
+                break;
+            };
+            if remaining.len() < frame_len {
+                break;
+            }
+            let body_start = std::mem::size_of::<u64>();
+            let body_end = body_start + len;
+            let body = &remaining[body_start..body_end];
+            let checksum = u32::from_be_bytes([
+                remaining[body_end],
+                remaining[body_end + 1],
+                remaining[body_end + 2],
+                remaining[body_end + 3],
+            ]);
+            if checksum != crc32fast::hash(body) {
+                bail!("manifest checksum mismatched at byte offset {valid_len}");
+            }
+            records.push(
+                serde_json::from_slice(body).with_context(|| {
+                    format!("invalid manifest record at byte offset {valid_len}")
+                })?,
+            );
+            valid_len += frame_len;
+        }
+        if valid_len < buf.len() {
+            file.set_len(valid_len as u64)
+                .context("failed to truncate incomplete manifest tail")?;
+            file.sync_all()
+                .context("failed to sync truncated manifest tail")?;
+        }
         Ok((
             Self {
                 file: Arc::new(Mutex::new(file)),
@@ -80,7 +132,11 @@ impl Manifest {
 
     pub fn add_record_when_init(&self, record: ManifestRecord) -> Result<()> {
         let mut file = self.file.lock();
-        let buf = serde_json::to_vec(&record)?;
+        let mut buf = serde_json::to_vec(&record)?;
+        let len = u64::try_from(buf.len()).context("manifest record is too large")?;
+        let checksum = crc32fast::hash(&buf);
+        file.write_all(&len.to_be_bytes())?;
+        buf.put_u32(checksum);
         file.write_all(&buf)?;
         file.sync_all()?;
         Ok(())

@@ -179,6 +179,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crc32fast"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8498c871161e1742aaa9d52551b2d6ebdd4c3d45a3be423e3728f33b955be550"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "crossbeam-channel"
 version = "0.5.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -373,6 +382,7 @@ dependencies = [
  "arc-swap",
  "bytes",
  "clap",
+ "crc32fast",
  "crossbeam-channel",
  "crossbeam-epoch",
  "crossbeam-skiplist",

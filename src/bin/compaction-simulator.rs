@@ -1,3 +1,17 @@
+// Copyright (c) 2022-2026 Alex Chi Z
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 mod wrapper;
 use wrapper::mini_lsm_wrapper;
 
@@ -14,13 +28,24 @@ use mini_lsm_wrapper::key::KeyBytes;
 use mini_lsm_wrapper::lsm_storage::LsmStorageState;
 use mini_lsm_wrapper::mem_table::MemTable;
 use mini_lsm_wrapper::table::SsTable;
+use rand::rngs::StdRng;
+use rand::{Rng, RngExt, SeedableRng};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 enum Args {
     Simple {
+        /// Dump the generated ID instead of where the original data comes from.
+        /// For example, if SST 1, 2, 3 is compacted to another level, it should have
+        /// a new SST ID 4, 5, 6 as SSTs are immutable and write-once. With this flag
+        /// enabled, you will see the new level has SST 1, 2, 3 because the data of
+        /// 4, 5, 6 are originated from 1, 2, 3.
         #[clap(long)]
         dump_real_id: bool,
+        /// Only dump size information instead of the layer files. if this is enabled,
+        /// it will print one row per compaction iteration.
+        #[clap(long)]
+        size_only: bool,
         #[clap(long, default_value = "2")]
         level0_file_num_compaction_trigger: usize,
         #[clap(long, default_value = "3")]
@@ -31,9 +56,18 @@ enum Args {
         iterations: usize,
     },
     Tiered {
+        /// Dump the generated ID instead of where the original data comes from.
+        /// For example, if SST 1, 2, 3 is compacted to another level, it should have
+        /// a new SST ID 4, 5, 6 as SSTs are immutable and write-once. With this flag
+        /// enabled, you will see the new level has SST 1, 2, 3 because the data of
+        /// 4, 5, 6 are originated from 1, 2, 3.
         #[clap(long)]
         dump_real_id: bool,
-        #[clap(long, default_value = "3")]
+        /// Only dump size information instead of the layer files. if this is enabled,
+        /// it will print one row per compaction iteration.
+        #[clap(long)]
+        size_only: bool,
+        #[clap(long, default_value = "8")]
         num_tiers: usize,
         #[clap(long, default_value = "200")]
         max_size_amplification_percent: usize,
@@ -41,12 +75,23 @@ enum Args {
         size_ratio: usize,
         #[clap(long, default_value = "2")]
         min_merge_width: usize,
+        #[clap(long)]
+        max_merge_width: Option<usize>,
         #[clap(long, default_value = "50")]
         iterations: usize,
     },
     Leveled {
+        /// Dump the generated ID instead of where the original data comes from.
+        /// For example, if SST 1, 2, 3 is compacted to another level, it should have
+        /// a new SST ID 4, 5, 6 as SSTs are immutable and write-once. With this flag
+        /// enabled, you will see the new level has SST 1, 2, 3 because the data of
+        /// 4, 5, 6 are originated from 1, 2, 3.
         #[clap(long)]
         dump_real_id: bool,
+        /// Only dump size information instead of the layer files. if this is enabled,
+        /// it will print one row per compaction iteration.
+        #[clap(long)]
+        size_only: bool,
         #[clap(long, default_value = "2")]
         level0_file_num_compaction_trigger: usize,
         #[clap(long, default_value = "2")]
@@ -59,6 +104,10 @@ enum Args {
         iterations: usize,
         #[clap(long, default_value = "32")]
         sst_size_mb: usize,
+        /// Seed for the mock SST key ranges. Use the same seed when comparing
+        /// learner and reference output.
+        #[clap(long, default_value = "42")]
+        seed: u64,
     },
 }
 
@@ -148,6 +197,14 @@ impl MockStorage {
         }
     }
 
+    pub fn dump_size_only(&self) {
+        print!("Levels: {}", self.snapshot.l0_sstables.len());
+        for (_, files) in &self.snapshot.levels {
+            print!(" {}", files.len());
+        }
+        println!();
+    }
+
     pub fn dump_original_id(&self, always_show_l0: bool, with_key: bool) {
         if !self.snapshot.l0_sstables.is_empty() || always_show_l0 {
             println!(
@@ -185,15 +242,13 @@ impl MockStorage {
     }
 }
 
-fn generate_random_key_range() -> (KeyBytes, KeyBytes) {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let begin: usize = rng.gen_range(0..(1 << 31));
-    let end: usize = begin + rng.gen_range((1 << 10)..(1 << 31));
+fn generate_random_key_range<R: Rng + ?Sized>(rng: &mut R) -> (KeyBytes, KeyBytes) {
+    let begin: u64 = rng.random_range(0..(1 << 31));
+    let end: u64 = begin + rng.random_range((1 << 10)..(1 << 31));
     let mut begin_bytes = BytesMut::new();
     let mut end_bytes = BytesMut::new();
-    begin_bytes.put_u64(begin as u64);
-    end_bytes.put_u64(end as u64);
+    begin_bytes.put_u64(begin);
+    end_bytes.put_u64(end);
     (
         KeyBytes::for_testing_from_bytes_no_ts(begin_bytes.freeze()),
         KeyBytes::for_testing_from_bytes_no_ts(end_bytes.freeze()),
@@ -231,6 +286,7 @@ fn main() {
     match args {
         Args::Simple {
             dump_real_id,
+            size_only,
             size_ratio_percent,
             iterations,
             level0_file_num_compaction_trigger,
@@ -252,14 +308,18 @@ fn main() {
                 println!("=== Iteration {i} ===");
                 storage.flush_sst_to_l0();
                 println!("--- After Flush ---");
-                if dump_real_id {
+                if size_only {
+                    storage.dump_size_only();
+                } else if dump_real_id {
                     storage.dump_real_id(true, false);
                 } else {
                     storage.dump_original_id(true, false);
                 }
                 let mut num_compactions = 0;
                 while let Some(task) = {
-                    println!("--- Compaction Task ---");
+                    if !size_only {
+                        println!("--- Compaction Task ---");
+                    }
                     controller.generate_compaction_task(&storage.snapshot)
                 } {
                     let mut sst_ids = Vec::new();
@@ -289,7 +349,9 @@ fn main() {
                     storage.snapshot = snapshot;
                     storage.remove(&del);
                     println!("--- After Compaction ---");
-                    if dump_real_id {
+                    if size_only {
+                        storage.dump_size_only();
+                    } else if dump_real_id {
                         storage.dump_real_id(true, false);
                     } else {
                         storage.dump_original_id(true, false);
@@ -333,10 +395,12 @@ fn main() {
         }
         Args::Tiered {
             dump_real_id,
+            size_only,
             num_tiers: level0_file_num_compaction_trigger,
             max_size_amplification_percent,
             size_ratio,
             min_merge_width,
+            max_merge_width,
             iterations,
         } => {
             let controller = TieredCompactionController::new(TieredCompactionOptions {
@@ -344,6 +408,7 @@ fn main() {
                 max_size_amplification_percent,
                 size_ratio,
                 min_merge_width,
+                max_merge_width,
             });
             let mut storage = MockStorage::new();
             let mut max_space = 0;
@@ -351,15 +416,21 @@ fn main() {
                 println!("=== Iteration {i} ===");
                 storage.flush_sst_to_new_tier();
                 println!("--- After Flush ---");
-                if dump_real_id {
+                if size_only {
+                    storage.dump_size_only();
+                } else if dump_real_id {
                     storage.dump_real_id(false, false);
                 } else {
                     storage.dump_original_id(false, false);
                 }
-                println!("--- Compaction Task ---");
+                if !size_only {
+                    println!("--- Compaction Task ---");
+                }
                 let mut num_compactions = 0;
                 while let Some(task) = {
-                    println!("--- Compaction Task ---");
+                    if !size_only {
+                        println!("--- Compaction Task ---");
+                    }
                     controller.generate_compaction_task(&storage.snapshot)
                 } {
                     let mut sst_ids = Vec::new();
@@ -379,7 +450,9 @@ fn main() {
                     storage.snapshot = snapshot;
                     storage.remove(&del);
                     println!("--- After Compaction ---");
-                    if dump_real_id {
+                    if size_only {
+                        storage.dump_size_only();
+                    } else if dump_real_id {
                         storage.dump_real_id(false, false);
                     } else {
                         storage.dump_original_id(false, false);
@@ -423,12 +496,14 @@ fn main() {
         }
         Args::Leveled {
             dump_real_id,
+            size_only,
             level0_file_num_compaction_trigger,
             level_size_multiplier,
             max_levels,
             base_level_size_mb,
             iterations,
             sst_size_mb,
+            seed,
         } => {
             let controller = LeveledCompactionController::new(LeveledCompactionOptions {
                 level0_file_num_compaction_trigger,
@@ -438,6 +513,8 @@ fn main() {
             });
 
             let mut storage = MockStorage::new();
+            let mut rng = StdRng::seed_from_u64(seed);
+            println!("Seed: {seed}");
             for i in 0..max_levels {
                 storage.snapshot.levels.push((i + 1, Vec::new()));
             }
@@ -445,7 +522,7 @@ fn main() {
             for i in 0..iterations {
                 println!("=== Iteration {i} ===");
                 let id = storage.flush_sst_to_l0();
-                let (first_key, last_key) = generate_random_key_range();
+                let (first_key, last_key) = generate_random_key_range(&mut rng);
                 storage.snapshot.sstables.insert(
                     id,
                     Arc::new(SsTable::create_meta_only(
@@ -456,14 +533,18 @@ fn main() {
                     )),
                 );
                 println!("--- After Flush ---");
-                if dump_real_id {
+                if size_only {
+                    storage.dump_size_only();
+                } else if dump_real_id {
                     storage.dump_real_id(false, true);
                 } else {
                     storage.dump_original_id(false, true);
                 }
                 let mut num_compactions = 0;
                 while let Some(task) = {
-                    println!("--- Compaction Task ---");
+                    if !size_only {
+                        println!("--- Compaction Task ---");
+                    }
                     controller.generate_compaction_task(&storage.snapshot)
                 } {
                     let mut sst_ids = Vec::new();
@@ -561,12 +642,18 @@ fn main() {
                             .join(", ")
                     );
                     max_space = max_space.max(storage.file_list.len());
-                    let (snapshot, del) =
-                        controller.apply_compaction_result(&storage.snapshot, &task, &sst_ids);
+                    let (snapshot, del) = controller.apply_compaction_result(
+                        &storage.snapshot,
+                        &task,
+                        &sst_ids,
+                        false,
+                    );
                     storage.snapshot = snapshot;
                     storage.remove(&del);
                     println!("--- After Compaction ---");
-                    if dump_real_id {
+                    if size_only {
+                        storage.dump_size_only();
+                    } else if dump_real_id {
                         storage.dump_real_id(true, true);
                     } else {
                         storage.dump_original_id(true, true);

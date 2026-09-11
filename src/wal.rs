@@ -23,7 +23,7 @@ use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::key::KeySlice;
+use crate::key::{KeyBytes, KeySlice};
 
 pub struct Wal {
     file: Arc<Mutex<BufWriter<File>>>,
@@ -45,7 +45,7 @@ impl Wal {
     }
 
     /// Week 2 Day 6: recover entries from a write-ahead log.
-    pub fn recover(path: impl AsRef<Path>, skiplist: &SkipMap<Bytes, Bytes>) -> Result<Self> {
+    pub fn recover(path: impl AsRef<Path>, skiplist: &SkipMap<KeyBytes, Bytes>) -> Result<Self> {
         let mut file = OpenOptions::new()
             .read(true)
             .append(true)
@@ -60,7 +60,10 @@ impl Wal {
                 break;
             }
             let key_len = u16::from_be_bytes([remaining[0], remaining[1]]) as usize;
-            let Some(value_len_offset) = std::mem::size_of::<u16>().checked_add(key_len) else {
+            let Some(key_end) = std::mem::size_of::<u16>().checked_add(key_len) else {
+                break;
+            };
+            let Some(value_len_offset) = key_end.checked_add(std::mem::size_of::<u64>()) else {
                 break;
             };
             let Some(value_offset) = value_len_offset.checked_add(std::mem::size_of::<u16>())
@@ -91,9 +94,10 @@ impl Wal {
             if crc32fast::hash(&remaining[..checksum_offset]) != expected_checksum {
                 bail!("WAL checksum mismatched at byte offset {valid_len}");
             }
-            let key = Bytes::copy_from_slice(&remaining[2..value_len_offset]);
+            let key = Bytes::copy_from_slice(&remaining[2..key_end]);
+            let ts = u64::from_be_bytes(remaining[key_end..value_len_offset].try_into().unwrap());
             let value = Bytes::copy_from_slice(&remaining[value_offset..checksum_offset]);
-            skiplist.insert(key, value);
+            skiplist.insert(KeyBytes::from_bytes_with_ts(key, ts), value);
             valid_len += record_len;
         }
         if valid_len < buf.len() {
@@ -108,14 +112,18 @@ impl Wal {
     }
 
     /// Week 2 Day 6: append a key-value pair to the write-ahead log.
-    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        let key_len = u16::try_from(key.len()).context("WAL key is too large")?;
+    pub fn put(&self, key: KeySlice, value: &[u8]) -> Result<()> {
+        let key_len = u16::try_from(key.key_len()).context("WAL key is too large")?;
         let value_len = u16::try_from(value.len()).context("WAL value is too large")?;
         let mut buf = Vec::with_capacity(
-            key.len() + value.len() + std::mem::size_of::<u16>() * 2 + std::mem::size_of::<u32>(),
+            key.raw_len()
+                + value.len()
+                + std::mem::size_of::<u16>() * 2
+                + std::mem::size_of::<u32>(),
         );
         buf.put_u16(key_len);
-        buf.put_slice(key);
+        buf.put_slice(key.key_ref());
+        buf.put_u64(key.ts());
         buf.put_u16(value_len);
         buf.put_slice(value);
         buf.put_u32(crc32fast::hash(&buf));

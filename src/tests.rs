@@ -17,3 +17,4 @@ mod week2_day4;
 mod week2_day5;
 mod week2_day6;
 mod week3_day1;
+mod week3_day2;

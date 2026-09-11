@@ -19,7 +19,7 @@ use crossbeam_skiplist::SkipMap;
 use tempfile::tempdir;
 
 use crate::block::Block;
-use crate::key::{KeySlice, TS_DEFAULT};
+use crate::key::{KeyBytes, KeySlice, TS_DEFAULT};
 use crate::lsm_storage::{LsmStorageOptions, MiniLsm, WriteBatchRecord};
 use crate::manifest::{Manifest, ManifestRecord};
 use crate::table::bloom::Bloom;
@@ -160,14 +160,22 @@ fn checkpoint_wal_round_trip_corruption_and_truncation() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("00000.wal");
     let wal = Wal::create(&path).unwrap();
-    wal.put(b"key", b"value").unwrap();
+    wal.put(KeySlice::from_slice_with_ts(b"key", TS_DEFAULT), b"value")
+        .unwrap();
     wal.sync().unwrap();
     drop(wal);
     let original = std::fs::read(&path).unwrap();
-    let recovered = SkipMap::<Bytes, Bytes>::new();
+    let recovered = SkipMap::<KeyBytes, Bytes>::new();
     Wal::recover(&path, &recovered).unwrap();
     assert_eq!(
-        recovered.get(b"key".as_slice()).unwrap().value().as_ref(),
+        recovered
+            .get(&KeyBytes::from_bytes_with_ts(
+                Bytes::from_static(b"key"),
+                TS_DEFAULT,
+            ))
+            .unwrap()
+            .value()
+            .as_ref(),
         b"value"
     );
 
